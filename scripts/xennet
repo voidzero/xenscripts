@@ -1,0 +1,356 @@
+#!/bin/bash
+# vim: ts=2 sw=2 et ft=sh fdm=marker
+
+exec 2>> /var/log/xen/networking.log
+
+# Global variables  {{{
+
+unique=$(dd status=noxfer if=/dev/urandom bs=1 count=6 2>/dev/null | openssl enc -a)
+dir="${0%/*}"
+
+# Source the rest from $dir/xen.conf
+[[ -r ${dir%/scripts*}/xen.conf ]] && . ${dir%/scripts*}/xen.conf
+
+# }}}
+
+# Functions  {{{
+
+checklog() {
+  # {{{
+  # If called with no arguments set the global loglevel.
+  # If called with one argument by logmsg(), it is to get
+  # the number of the log message.
+
+  local _ll _log
+  if [[ -z $1 ]]; then
+    _log=${LOGLEVEL}
+  else
+    _log=$1
+  fi
+
+  case ${_log} in
+    DEBUG)   _ll=1 ;;
+    INFO)    _ll=2 ;;
+    NOTICE)  _ll=3 ;;
+    WARNING) _ll=4 ;;
+    ERR)     _ll=5 ;;
+    CRIT)    _ll=6 ;;
+    *)       (( _ll=255 )) ;;
+  esac
+
+  if [[ -z "$1" ]]; then
+    loglevel=$_ll
+  else
+    echo $_ll
+  fi
+
+}  # }}}
+
+logmsg() {
+  # {{{
+  # $1 is the level for this log
+  local logprio _level=$1; shift
+
+  [[  -z $loglevel ]] && checklog
+  level=$(checklog $_level)
+  (( $level < $loglevel )) && return
+
+
+  log() {
+    if [[ ${LOGFILE} == "echo" ]]; then
+      echo "$(date '+%x %X') $_level $@"
+    elif [[ ${LOGFILE} == "syslog" || ! -w "${LOGFILE%/*}" ]]; then
+      [[ -z $prio ]] && prio=$(echo $_level | tr '[A-Z]' '[a-z]')
+      logger -p daemon.${prio} "_level $@"
+    else
+      #echo "level $_level, level $level, loglevel $loglevel, LOGLEVEL $LOGLEVEL" >> ${LOGFILE}
+      echo "$(date '+%x %X') $_level $@" >> ${LOGFILE}
+    fi
+  }
+
+  case $ACTION in
+    "")
+      log "«$unique» ***** $@" ;;
+    online|add)
+      log "«$unique» +++++ [$0] -- $@" ;; 
+    offline|remove)
+      log "«$unique» ----- [$0] -- $@" ;;
+    *)
+      log "«$unique» ooooo [$0] -- $@" ;;
+  esac
+}  # }}}
+
+sigerr() {
+  # {{{
+  fatal "sigerr from $0: error detected. $@"
+}
+trap sigerr ERR
+# }}}
+
+fatal() {
+  # {{{
+  xenstore-write "$XENBUS_PATH/hotplug-error" "$*" \
+    "$XENBUS_PATH/hotplug-status" error
+  logmsg DEBUG "Fatal exception occurred: $*"
+  exit 1
+}  # }}}
+
+success() {
+  # {{{
+  # Tell DevController that backend is "connected"
+  xenstore-write "$XENBUS_PATH/hotplug-status" connected
+}  # }}}
+
+vifread() {
+  # {{{
+  logmsg DEBUG "reading $1"
+  xenstore-read "$1"
+}  # }}}
+
+vifwrite() {
+  # {{{
+  local viftype="${1}names"
+  MYPATH=${XENBUS_PATH%/*}
+  MYPATH=${MYPATH##*/}
+
+  logmsg DEBUG "vifwriting $1 ${viftype}/$MYPATH: $2"
+  xenstore-write "${viftype}/$MYPATH" "$2"
+}  # }}}
+
+xenstore_read_default() {
+  # {{{
+  if read=$(xenstore-read "$1" 2>/dev/null); then
+    #logmsg DEBUG "Read $read from xenstore"
+    echo $read
+    return
+  else
+    #logmsg DEBUG "Could not find '$read'; passing '$2' instead."
+    echo $2
+    return
+  fi
+}  # }}}
+
+index() {
+  # Index: substitute for expr using bash internals  {{{
+  local _idx
+  case $1 in
+    "") return 1 ;;
+
+  *"$2"*)
+    _idx=${1%%"$2"*}
+    logmsg DEBUG "With 1=$1 and 2=$2, index sees that _idx='$_idx' so I will echo $(( ${#_idx} + 1 ))"
+    echo $(( ${#_idx} + 1 ))
+    ;;
+
+  *) return 1 ;;
+esac
+}  # }}}
+
+findCommand() {
+  # {{{
+  # FindCommand looks for a single word, passed by xen-hotplug.rules to this script
+  # the single word is then assigned to the variable 'command'.
+  # TODO: Replace 'command' with 'action' or so.
+  local _var
+  for _var in "$@"; do
+    if ! index "$_var" '='; then
+      command="$_var"
+      logmsg DEBUG "$0 found command $command!"
+      return
+    fi
+  done
+}  # }}}
+
+evalVariables() {
+  # {{{
+  # evalVariables looks for arguments that are akin to "foo=bar" and it evals those,
+  # so they effectively get set. They come from xen-hotplug.rules.
+  local idx _var
+
+  for _var in $@; do
+    idx=$(index "$_var" '=') 
+    logmsg DEBUG "evalVar sees with _var='$_var' that idx='$idx'"
+    if (( ${idx:-0} > 1 )); then
+      eval "$_var"
+      logmsg DEBUG "$0 learned that $_var"
+    else
+      logmsg DEBUG "in $0, idx='$idx'"
+    fi
+  done
+}  # }}}
+
+# }}}
+
+# Fake commands
+# ip() {
+#   logmsg INFO "would have done ip $@"
+# }
+# 
+# ovs-vsctl() {
+#   logmsg INFO "would have done ovs-vsctl $@"
+# }
+
+logmsg INFO "New instance of $(basename $0) got called with ${#@} args: $*"
+findCommand "$@"
+evalVariables "$@"
+
+logmsg DEBUG "I might already know this: ACTION='${ACTION}', dir='${dir}', command='${command}', dev='${dev}', type_if='${type_if}', bridge='${bridge}'"
+logmsg DEBUG "Env output: $(env | sed -e 's;^;'"(env) "'  ;g'; echo)End of Env"
+
+if ! [[ "$command" =~ online|offline|add|remove ]]; then
+  logmsg ERR "Script called with wrong command '$command'! Exiting."
+  exit 1
+fi
+
+: ${type_if:=vif}
+
+# Set $dev to either $vif or $INTERFACE
+case "$type_if" in  # {{{
+  vif)
+    dev=$vif
+    #logmsg DEBUG "FIXME: maybe put vifname here from line 234 -- type_if is $type_if, setting dev to \$vif: $dev"
+    ;;
+  tap)
+    dev=$INTERFACE
+    #logmsg DEBUG "FIXME: maybe put vifname here from line 234 -- type_if is $type_if, setting dev to \$INTERFACE: $dev"
+    ;;
+esac  # }}}
+
+# If you just don't fuck this up elsewhere (udev) then you don't need the whole routine here
+#case "$command" in {{{
+#    online | offline)
+#        test "$type_if" != vif && logmsg DEBUG "VIF-COMMON bork1" && exit 0
+#        ;;
+#    add | remove)
+#        test "$type_if" != tap && logmsg DEBUG "VIF-COMMON bork2" && exit 0
+#        ;;
+#esac }}}
+
+
+# Set the name for the device
+case $type_if in
+  vif)
+    # Check presence of compulsory args.
+    vifname="$(xenstore-read $XENBUS_PATH/vifname || echo '')"
+    bridge=$(xenstore_read_default "$XENBUS_PATH/bridge" "$bridge")
+    logmsg DEBUG "Does bridge for vif exist? bridge='$bridge' pulled out of $XENBUS_PATH/bridge"
+
+
+    logmsg DEBUG "VIFFER: XENBUS_PATH='$XENBUS_PATH', type_if='$type_if', dev='$dev', dev_='$dev_', vifname='$vifname'"
+
+    if [[ -n "$vifname" && "$command" == "online" ]]; then
+      # remember the vifname
+      vifwrite vif ${vifname}
+
+      if [[ ! -d /sys/class/net/$vifname ]]; then
+        logmsg INFO "Setting name of dev $dev to $vifname"
+        ip link set dev $dev name $vifname || fatal "$@ failed"
+      fi
+
+    elif [[ -z "$vifname" && "$command" == "offline" ]]; then
+      #logmsg DEBUG "xenbuspath='$XENBUS_PATH' ACTION='$ACTION' command='$command' vifname='$vifname' dev='$dev'"
+      MYPATH=$(echo $XENBUS_PATH | awk -F'/' '{print $(NF-1)}')
+      vifname=$(vifread "vifnames/${MYPATH}")
+      logmsg DEBUG "Took vifname='$vifname' from mypath ${MYPATH}"
+
+    else
+      # Just a message that should probably never be triggered but in case it does, we can find it back here.
+      logmsg WARNING "Routine 3a should be made, vifname='$vifname', command='$command'"
+    fi
+    dev=$vifname
+    ;;
+
+  tap)
+
+    # Get xenbus_path from device name.
+    # The name is built like that: "vif${domid}.${devid}-emu".
+    dev_=${dev#vif}
+    dev_=${dev_%-emu}
+    domid=${dev_%.*}
+    devid=${dev_#*.}
+    logmsg DEBUG "TAPPER: XENBUS_PATH='$XENBUS_PATH', type_if='$type_if', dev_='$dev_', domid='$domid', devid='$devid', command='$command', vifname='$vifname'"
+    logmsg DEBUG "Setting VIFPATH_XENBUS to backend/vif/$domid/$devid"
+    #VIFPATH_XENBUS="/local/domain/0/backend/vif/$domid/$devid"
+    VIFPATH_XENBUS="backend/vif/$domid/$devid"
+    XENBUS_PATH="$VIFPATH_XENBUS"
+    bridge=$(xenstore_read_default "$XENBUS_PATH/bridge" "$bridge")
+    logmsg DEBUG "Does bridge for tap exist? bridge='$bridge' pulled out of $XENBUS_PATH/bridge"
+
+
+    logmsg DEBUG "+Pulling tap vifname from xenstore: $XENBUS_PATH/vifname"
+    vifname=$(xenstore_read_default "$XENBUS_PATH/vifname" "$vifname")
+    logmsg DEBUG "+Ok, tap vifname='$vifname'"
+
+    if [[ -n "$vifname" && $command == "add" ]]; then
+      logmsg DEBUG "Replacing tap vifname='$vifname' with $vifname-emu"
+      vifname="${vifname}-emu"
+      #logmsg DEBUG "+Writing tapname ${vifname-emu}"
+      #vifwrite tap ${vifname}
+      if [[ ! -d /sys/class/net/$vifname ]]; then
+        logmsg INFO "Setting name of dev $dev to $vifname"
+        ip link set "$dev" name "$vifname" || fatal "ip link set $dev name $vifname failed"
+      fi
+      logmsg DEBUG "setting dev='$dev' to vifname='$vifname'"
+      dev="$vifname"
+
+    elif [[ -z "$vifname" && "$command" == "remove" ]]; then
+      #vifname=$(vifread "vifnames/${domid}")-emu
+      #dev="$vifname"
+      #logmsg DEBUG "vifname='$vifname' to dev='$dev'"
+      logmsg DEBUG "setting vifname='$vifname' to dev='$dev'"
+      vifname=${dev}
+
+    else
+      # Just a message that should probably never be triggered but in case it does, we can find it back here.
+      logmsg WARNING "Routine 3b should be made, vifname='$vifname', command='$command'"
+    fi
+    ;;
+esac
+
+# Now that the previous routine ended we can treat tap and vif in the same way below.
+
+# Add or remove the vif to/from a switchport
+case "$command" in
+  online|add)
+    logmsg DEBUG "Going to bring up $dev and adding it to bridge $bridge"
+    genmac=$(${dir}/genmac.zsh)
+    while true; do
+      if grep -q $genmac /sys/class/net/*/address; then
+        genmac=$(${dir}/genmac.zsh)
+      else
+        logmsg DEBUG "Generated a mac address: $genmac"
+        break
+      fi
+    done
+    if [[ -z "$bridge" ]]; then
+      logmsg DEBUG "Bridge is not specified, bailing."
+    elif [[ ! -d /sys/class/net/${bridge} ]]; then
+      logmsg DEBUG "Bridge $bridge does not exist!"
+    else
+      mtu="$(</sys/class/net/${bridge}/mtu)"
+      logmsg DEBUG "Learned that bridge='$bridge' has an MTU of $mtu"
+    fi
+    ip -4 addr flush dev ${dev}
+
+    if [[ $type_if == "tap" ]]; then
+      logmsg DEBUG "Running ip link set dev ${dev} address ${genmac} mtu ${mtu:-1500}" 
+      ip link set dev ${dev} address ${genmac} mtu ${mtu:-1500}
+    fi
+    ovs-vsctl -- --may-exist add-port ${bridge} ${dev}
+    ip link set dev ${dev} up
+    success
+    ;;
+
+  offline|remove)
+    logmsg DEBUG "Going to take down $dev and removing it as a bridge port"
+    [[ -d /sys/class/net/${dev} ]] && ip link set dev $dev down
+    ovs-vsctl -- --if-exists del-port "$dev"
+    ;;
+
+  *)
+    logmsg DEBUG echo "VIF-BRIDGE CALLED WITH COMMAND $command dev ${dev} ARGS ${*}"
+    ;;
+esac
+
+logmsg DEBUG "Completed $0 with command='$command', dev='$dev', bridge='$bridge'."
+
