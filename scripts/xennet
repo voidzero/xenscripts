@@ -181,21 +181,21 @@ evalVariables() {
 
 # }}}
 
-# Fake commands
+# Fake commands  {{{
 # ip() {
 #   logmsg INFO "would have done ip $@"
 # }
 # 
 # ovs-vsctl() {
 #   logmsg INFO "would have done ovs-vsctl $@"
-# }
+# }  # }}}
 
 logmsg INFO "New instance of $(basename $0) got called with ${#@} args: $*"
 findCommand "$@"
 evalVariables "$@"
 
-logmsg DEBUG "I might already know this: ACTION='${ACTION}', dir='${dir}', command='${command}', dev='${dev}', type_if='${type_if}', bridge='${bridge}'"
-logmsg DEBUG "Env output: $(env | sed -e 's;^;'"(env) "'  ;g'; echo)End of Env"
+#logmsg DEBUG "I might already know this: ACTION='${ACTION}', dir='${dir}', command='${command}', dev='${dev}', type_if='${type_if}', bridge='${bridge}'"
+#logmsg DEBUG "Env output: $(env | sed -e 's;^;'"(env) "'  ;g'; echo)End of Env"
 
 if ! [[ "$command" =~ online|offline|add|remove ]]; then
   logmsg ERR "Script called with wrong command '$command'! Exiting."
@@ -204,28 +204,10 @@ fi
 
 : ${type_if:=vif}
 
-# Set $dev to either $vif or $INTERFACE
-case "$type_if" in  # {{{
-  vif)
-    dev=$vif
-    #logmsg DEBUG "FIXME: maybe put vifname here from line 234 -- type_if is $type_if, setting dev to \$vif: $dev"
-    ;;
-  tap)
-    dev=$INTERFACE
-    #logmsg DEBUG "FIXME: maybe put vifname here from line 234 -- type_if is $type_if, setting dev to \$INTERFACE: $dev"
-    ;;
-esac  # }}}
-
-# If you just don't fuck this up elsewhere (udev) then you don't need the whole routine here
-#case "$command" in {{{
-#    online | offline)
-#        test "$type_if" != vif && logmsg DEBUG "VIF-COMMON bork1" && exit 0
-#        ;;
-#    add | remove)
-#        test "$type_if" != tap && logmsg DEBUG "VIF-COMMON bork2" && exit 0
-#        ;;
-#esac }}}
-
+case "$type_if" in
+  vif) dev=$vif ;;
+  tap) dev=$INTERFACE ;;
+esac
 
 # Set the name for the device
 case $type_if in
@@ -248,7 +230,6 @@ case $type_if in
       fi
 
     elif [[ -z "$vifname" && "$command" == "offline" ]]; then
-      #logmsg DEBUG "xenbuspath='$XENBUS_PATH' ACTION='$ACTION' command='$command' vifname='$vifname' dev='$dev'"
       MYPATH=$(echo $XENBUS_PATH | awk -F'/' '{print $(NF-1)}')
       vifname=$(vifread "vifnames/${MYPATH}")
       logmsg DEBUG "Took vifname='$vifname' from mypath ${MYPATH}"
@@ -269,13 +250,9 @@ case $type_if in
     domid=${dev_%.*}
     devid=${dev_#*.}
     logmsg DEBUG "TAPPER: XENBUS_PATH='$XENBUS_PATH', type_if='$type_if', dev_='$dev_', domid='$domid', devid='$devid', command='$command', vifname='$vifname'"
-    logmsg DEBUG "Setting VIFPATH_XENBUS to backend/vif/$domid/$devid"
-    #VIFPATH_XENBUS="/local/domain/0/backend/vif/$domid/$devid"
-    VIFPATH_XENBUS="backend/vif/$domid/$devid"
-    XENBUS_PATH="$VIFPATH_XENBUS"
+    XENBUS_PATH="backend/vif/$domid/$devid"
     bridge=$(xenstore_read_default "$XENBUS_PATH/bridge" "$bridge")
     logmsg DEBUG "Does bridge for tap exist? bridge='$bridge' pulled out of $XENBUS_PATH/bridge"
-
 
     logmsg DEBUG "+Pulling tap vifname from xenstore: $XENBUS_PATH/vifname"
     vifname=$(xenstore_read_default "$XENBUS_PATH/vifname" "$vifname")
@@ -348,7 +325,7 @@ case "$command" in
     ;;
 
   *)
-    logmsg DEBUG echo "VIF-BRIDGE CALLED WITH COMMAND $command dev ${dev} ARGS ${*}"
+    logmsg DEBUG echo "$0 CALLED WITH COMMAND $command dev ${dev} ARGS ${*}"
     ;;
 esac
 
