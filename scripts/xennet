@@ -117,6 +117,13 @@ vifwrite() {
   xenstore-write "${viftype}/$MYPATH" "$2"
 }  # }}}
 
+genmac() {
+  local hexchars="0123456789abcdef"
+  local suff=$(for i in {1..6} ; do echo -n ${hexchars:$(( $RANDOM % 16 )):1} ; done | sed -e 's/\(..\)/:\1/g')
+  echo "fe:ff:ff${suff}"
+}
+
+
 xenstore_read_default() {
   # {{{
   if read=$(xenstore-read "$1" 2>/dev/null); then
@@ -290,12 +297,12 @@ esac
 case "$command" in
   online|add)
     logmsg DEBUG "Going to bring up $dev and adding it to bridge $bridge"
-    genmac=$(${dir}/genmac.zsh)
+    macaddr=$(genmac)
     while true; do
-      if grep -q $genmac /sys/class/net/*/address; then
-        genmac=$(${dir}/genmac.zsh)
+      if grep -q $macaddr /sys/class/net/*/address; then
+        macaddr=$(genmac)
       else
-        logmsg DEBUG "Generated a mac address: $genmac"
+        logmsg DEBUG "Generated a mac address: $macaddr"
         break
       fi
     done
@@ -310,8 +317,8 @@ case "$command" in
     ip -4 addr flush dev ${dev}
 
     if [[ $type_if == "tap" ]]; then
-      logmsg DEBUG "Running ip link set dev ${dev} address ${genmac} mtu ${mtu:-1500}" 
-      ip link set dev ${dev} address ${genmac} mtu ${mtu:-1500}
+      logmsg DEBUG "Running ip link set dev ${dev} address ${macaddr} mtu ${mtu:-1500}" 
+      ip link set dev ${dev} address ${macaddr} mtu ${mtu:-1500}
     fi
     ovs-vsctl -- --may-exist add-port ${bridge} ${dev}
     ip link set dev ${dev} up
